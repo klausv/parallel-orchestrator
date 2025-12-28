@@ -52,9 +52,11 @@ python3 task-splitter.py "Implement user authentication with tests"
 2. Add `ANTHROPIC_API_KEY` to repository secrets
 3. Trigger via GitHub Mobile or Tasker
 
+Diagram: see `docs/parallel-tasks-diagram.md`.
+
 ## Directory Structure
 
-```
+```text
 parallel-orchestrator/
 ├── scripts/
 │   ├── setup-worktree.sh    # Create worktrees for parallel tasks

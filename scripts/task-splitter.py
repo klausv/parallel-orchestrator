@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-task-splitter.py - AI-powered task decomposition with conflict detection
+task-splitter.py - AI-powered task decomposition with overhead optimization
 
-Uses Claude API to analyze a task and split it into non-conflicting subtasks
-that can be executed in parallel without merge conflicts.
+Uses Claude API to analyze a task and split it into optimal number of
+non-conflicting subtasks, considering overhead costs and break-even points.
 
 Usage:
     python3 task-splitter.py "Implement user authentication with tests"
     python3 task-splitter.py --check-conflicts feature-a feature-b
     python3 task-splitter.py --analyze-repo
+    python3 task-splitter.py --max-splits 5 "Large refactoring task"
 """
 
 import os
@@ -16,8 +17,10 @@ import sys
 import json
 import argparse
 import subprocess
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass, asdict
 
 try:
     import anthropic
@@ -25,6 +28,286 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
+
+# ============================================================================
+# CONFIGURATION - Overhead and Resource Constraints
+# ============================================================================
+
+@dataclass
+class ParallelConfig:
+    """Configuration for parallelization decisions."""
+    # Overhead times (in seconds)
+    worktree_creation_time: float = 8.0      # Time to create a git worktree
+    session_startup_time: float = 5.0         # Time to start Claude session
+    context_building_time: float = 20.0       # Time for Claude to understand context
+    merge_time_per_branch: float = 10.0       # Time to merge each branch
+    conflict_resolution_base: float = 60.0    # Base time if conflicts occur
+
+    # Resource limits
+    max_concurrent_sessions: int = 8          # Maximum parallel Claude sessions
+    max_worktrees: int = 15                   # Maximum git worktrees per repo
+    min_files_per_subtask: int = 2            # Minimum files to justify a subtask
+    min_task_complexity: float = 0.2          # Minimum complexity to consider splitting
+
+    # Break-even thresholds (in minutes)
+    min_task_time_for_2_splits: float = 5.0   # Task must take >5 min for 2 parallel
+    min_task_time_for_3_splits: float = 12.0  # Task must take >12 min for 3 parallel
+    min_task_time_for_4_splits: float = 20.0  # etc.
+    min_task_time_for_5_plus: float = 30.0
+
+    # Complexity weights
+    complexity_per_file_modify: float = 0.15  # Modifying existing file
+    complexity_per_file_create: float = 0.10  # Creating new file
+    complexity_per_loc_estimate: float = 0.001  # Per line of code
+    complexity_per_dependency: float = 0.05   # Per cross-file dependency
+
+
+DEFAULT_CONFIG = ParallelConfig()
+
+
+# ============================================================================
+# OVERHEAD AND EFFICIENCY CALCULATIONS
+# ============================================================================
+
+@dataclass
+class OverheadAnalysis:
+    """Analysis of parallelization overhead and efficiency."""
+    estimated_sequential_minutes: float
+    estimated_parallel_minutes: float
+    overhead_minutes: float
+    efficiency_gain_percent: float
+    recommended_splits: int
+    break_even_splits: int
+    is_worth_parallelizing: bool
+    reasoning: str
+
+
+def calculate_overhead(num_splits: int, config: ParallelConfig = DEFAULT_CONFIG) -> float:
+    """Calculate total overhead in seconds for a given number of splits."""
+    if num_splits <= 1:
+        return 0.0
+
+    # Fixed overhead per session
+    per_session = (
+        config.worktree_creation_time +
+        config.session_startup_time +
+        config.context_building_time
+    )
+
+    # Merge overhead (sequential, not parallel)
+    merge_overhead = num_splits * config.merge_time_per_branch
+
+    # Total overhead
+    total = (per_session * num_splits) + merge_overhead
+
+    return total
+
+
+def calculate_parallel_time(
+    sequential_time: float,
+    num_splits: int,
+    config: ParallelConfig = DEFAULT_CONFIG
+) -> Tuple[float, float]:
+    """
+    Calculate parallel execution time and overhead.
+
+    Returns: (parallel_time, overhead_time) in seconds
+    """
+    if num_splits <= 1:
+        return sequential_time, 0.0
+
+    # Parallel execution: longest subtask determines time
+    # Assume roughly equal distribution with some variance
+    parallel_execution = sequential_time / num_splits * 1.2  # 20% variance buffer
+
+    overhead = calculate_overhead(num_splits, config)
+
+    total_parallel = parallel_execution + overhead
+
+    return total_parallel, overhead
+
+
+def find_optimal_splits(
+    estimated_sequential_minutes: float,
+    max_possible_splits: int,
+    config: ParallelConfig = DEFAULT_CONFIG
+) -> OverheadAnalysis:
+    """
+    Find the optimal number of splits considering overhead.
+
+    Returns OverheadAnalysis with recommendation.
+    """
+    sequential_seconds = estimated_sequential_minutes * 60
+
+    best_splits = 1
+    best_time = sequential_seconds
+    best_overhead = 0.0
+
+    # Evaluate each possible split count
+    analyses = []
+    for n in range(1, min(max_possible_splits + 1, config.max_concurrent_sessions + 1)):
+        parallel_time, overhead = calculate_parallel_time(sequential_seconds, n, config)
+
+        analyses.append({
+            'splits': n,
+            'parallel_time': parallel_time,
+            'overhead': overhead,
+            'total': parallel_time,
+            'gain': (sequential_seconds - parallel_time) / sequential_seconds * 100
+        })
+
+        if parallel_time < best_time:
+            best_time = parallel_time
+            best_splits = n
+            best_overhead = overhead
+
+    # Find break-even point (where parallelization starts being beneficial)
+    break_even = 1
+    for a in analyses:
+        if a['total'] < sequential_seconds:
+            break_even = a['splits']
+            break
+
+    # Check minimum thresholds
+    is_worth = best_splits > 1
+    reasoning_parts = []
+
+    if estimated_sequential_minutes < config.min_task_time_for_2_splits:
+        is_worth = False
+        best_splits = 1
+        reasoning_parts.append(
+            f"Task too small ({estimated_sequential_minutes:.1f} min < {config.min_task_time_for_2_splits} min threshold)"
+        )
+
+    if best_splits > 1:
+        efficiency = (sequential_seconds - best_time) / sequential_seconds * 100
+        reasoning_parts.append(
+            f"Optimal: {best_splits} parallel tasks saves {efficiency:.0f}% time"
+        )
+        reasoning_parts.append(
+            f"Overhead: {best_overhead/60:.1f} min for setup/merge"
+        )
+    else:
+        reasoning_parts.append("Sequential execution recommended")
+
+    return OverheadAnalysis(
+        estimated_sequential_minutes=estimated_sequential_minutes,
+        estimated_parallel_minutes=best_time / 60,
+        overhead_minutes=best_overhead / 60,
+        efficiency_gain_percent=(sequential_seconds - best_time) / sequential_seconds * 100 if best_splits > 1 else 0,
+        recommended_splits=best_splits,
+        break_even_splits=break_even,
+        is_worth_parallelizing=is_worth,
+        reasoning=" | ".join(reasoning_parts)
+    )
+
+
+# ============================================================================
+# COMPLEXITY SCORING
+# ============================================================================
+
+@dataclass
+class ComplexityScore:
+    """Complexity analysis of a task or repository."""
+    total_score: float  # 0.0 - 1.0+
+    file_count: int
+    estimated_loc: int
+    module_count: int
+    dependency_score: float
+    recent_change_risk: float
+    max_parallel_by_structure: int
+    breakdown: Dict[str, float]
+
+
+def analyze_complexity(
+    repo_structure: Dict,
+    recent_files: List[str],
+    task_description: str = "",
+    config: ParallelConfig = DEFAULT_CONFIG
+) -> ComplexityScore:
+    """
+    Analyze repository and task complexity.
+
+    Returns ComplexityScore with detailed breakdown.
+    """
+    # Count files and estimate structure
+    total_files = sum(len(files) for files in repo_structure.values())
+    module_count = len([k for k in repo_structure.keys() if k not in ['.', '']])
+
+    # Estimate LOC (rough heuristic: 100-300 LOC per file average)
+    estimated_loc = total_files * 150
+
+    # Recent change risk
+    recent_risk = min(len(recent_files) / 20, 1.0)  # Normalize to 0-1
+
+    # Calculate complexity components
+    breakdown = {
+        'file_complexity': min(total_files * 0.01, 0.4),
+        'module_complexity': min(module_count * 0.05, 0.3),
+        'loc_complexity': min(estimated_loc * config.complexity_per_loc_estimate, 0.3),
+        'recent_change_risk': recent_risk * 0.2,
+    }
+
+    # Task description keywords that indicate complexity
+    complex_keywords = [
+        'refactor', 'migrate', 'rewrite', 'redesign', 'overhaul',
+        'authentication', 'authorization', 'database', 'api',
+        'integration', 'performance', 'security', 'testing'
+    ]
+    task_lower = task_description.lower()
+    keyword_hits = sum(1 for kw in complex_keywords if kw in task_lower)
+    breakdown['task_keyword_complexity'] = min(keyword_hits * 0.1, 0.3)
+
+    total_score = sum(breakdown.values())
+
+    # Calculate max parallel based on structure
+    # Rule: Need at least min_files_per_subtask files per parallel task
+    max_by_files = max(1, total_files // config.min_files_per_subtask)
+    # Rule: Can't have more parallel tasks than modules (roughly)
+    max_by_modules = max(1, module_count)
+
+    max_parallel = min(
+        max_by_files,
+        max_by_modules,
+        config.max_concurrent_sessions
+    )
+
+    return ComplexityScore(
+        total_score=total_score,
+        file_count=total_files,
+        estimated_loc=estimated_loc,
+        module_count=module_count,
+        dependency_score=breakdown.get('module_complexity', 0),
+        recent_change_risk=recent_risk,
+        max_parallel_by_structure=max_parallel,
+        breakdown=breakdown
+    )
+
+
+def estimate_task_time(complexity: ComplexityScore, task_scope: str = "medium") -> float:
+    """
+    Estimate sequential task time in minutes based on complexity.
+
+    task_scope: "small" | "medium" | "large" | "xlarge"
+    """
+    scope_multipliers = {
+        'small': 5,      # 5-15 minutes
+        'medium': 20,    # 20-60 minutes
+        'large': 60,     # 1-3 hours
+        'xlarge': 180    # 3+ hours
+    }
+
+    base_time = scope_multipliers.get(task_scope, 20)
+
+    # Adjust based on complexity
+    adjusted = base_time * (1 + complexity.total_score)
+
+    return adjusted
+
+
+# ============================================================================
+# REPOSITORY ANALYSIS
+# ============================================================================
 
 def get_repo_structure(max_depth: int = 3) -> dict:
     """Get the repository file structure for context."""
@@ -44,7 +327,6 @@ def get_repo_structure(max_depth: int = 3) -> dict:
     for file in files:
         parts = file.split('/')
         if len(parts) > max_depth:
-            # Truncate deep paths
             key = '/'.join(parts[:max_depth]) + '/...'
         else:
             key = '/'.join(parts[:-1]) if len(parts) > 1 else '.'
@@ -71,13 +353,27 @@ def get_recent_changes() -> list:
     return list(set(files))
 
 
+def get_existing_worktrees() -> int:
+    """Count existing worktrees for this repo."""
+    result = subprocess.run(
+        ["git", "worktree", "list"],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        return 0
+
+    # Count lines (each worktree is one line)
+    return len(result.stdout.strip().split('\n'))
+
+
 def check_branch_conflicts(branches: list) -> dict:
     """Check for potential conflicts between branches."""
     conflicts = {}
 
     for i, branch1 in enumerate(branches):
         for branch2 in branches[i+1:]:
-            # Get files modified in each branch
             result1 = subprocess.run(
                 ["git", "diff", "--name-only", f"main...{branch1}"],
                 capture_output=True,
@@ -102,13 +398,17 @@ def check_branch_conflicts(branches: list) -> dict:
     return conflicts
 
 
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
 def validate_no_file_conflicts(subtasks: list) -> dict:
     """
     CRITICAL: Validate that subtasks don't have overlapping files.
     Returns validation result with any conflicts found.
     """
     conflicts = []
-    file_assignments = {}  # file -> subtask that owns it
+    file_assignments = {}
 
     for subtask in subtasks:
         name = subtask.get('name', 'unknown')
@@ -134,38 +434,97 @@ def validate_no_file_conflicts(subtasks: list) -> dict:
     }
 
 
-def split_task_with_claude(task: str, repo_structure: dict, recent_files: list) -> dict:
-    """Use Claude API to split task into parallel subtasks."""
+def validate_resource_constraints(
+    num_splits: int,
+    config: ParallelConfig = DEFAULT_CONFIG
+) -> Dict:
+    """Validate that proposed splits don't exceed resource constraints."""
+    existing_worktrees = get_existing_worktrees()
+    available_worktrees = config.max_worktrees - existing_worktrees
+
+    issues = []
+
+    if num_splits > config.max_concurrent_sessions:
+        issues.append(f"Exceeds max concurrent sessions ({config.max_concurrent_sessions})")
+
+    if num_splits > available_worktrees:
+        issues.append(f"Exceeds available worktrees ({available_worktrees} available)")
+
+    return {
+        "valid": len(issues) == 0,
+        "issues": issues,
+        "existing_worktrees": existing_worktrees,
+        "available_worktrees": available_worktrees,
+        "max_concurrent": config.max_concurrent_sessions
+    }
+
+
+# ============================================================================
+# AI-POWERED TASK SPLITTING
+# ============================================================================
+
+def split_task_with_claude(
+    task: str,
+    repo_structure: dict,
+    recent_files: list,
+    complexity: ComplexityScore,
+    overhead_analysis: OverheadAnalysis,
+    config: ParallelConfig = DEFAULT_CONFIG
+) -> dict:
+    """Use Claude API to split task into optimal number of parallel subtasks."""
     if not HAS_ANTHROPIC:
         return {
             "error": "anthropic package not installed. Run: pip install anthropic",
-            "fallback": generate_fallback_split(task)
+            "fallback": generate_fallback_split(task, overhead_analysis.recommended_splits)
         }
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return {
             "error": "ANTHROPIC_API_KEY not set",
-            "fallback": generate_fallback_split(task)
+            "fallback": generate_fallback_split(task, overhead_analysis.recommended_splits)
         }
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    prompt = f"""Analyze this development task and split it into 2-3 independent subtasks
+    # Dynamic split recommendation based on analysis
+    recommended = overhead_analysis.recommended_splits
+    max_splits = min(
+        complexity.max_parallel_by_structure,
+        config.max_concurrent_sessions,
+        10  # Hard upper limit
+    )
+
+    prompt = f"""Analyze this development task and split it into the OPTIMAL number of independent subtasks
 that can be executed in parallel by different AI agents WITHOUT CAUSING MERGE CONFLICTS.
 
 TASK: {task}
 
+PARALLELIZATION ANALYSIS (pre-computed):
+- Recommended splits: {recommended} (based on overhead analysis)
+- Maximum possible splits: {max_splits} (based on repository structure)
+- Estimated sequential time: {overhead_analysis.estimated_sequential_minutes:.0f} minutes
+- Worth parallelizing: {overhead_analysis.is_worth_parallelizing}
+- Repository complexity score: {complexity.total_score:.2f}
+- Number of modules: {complexity.module_count}
+
 REPOSITORY STRUCTURE:
 {json.dumps(repo_structure, indent=2)}
 
-RECENTLY MODIFIED FILES (STRICTLY AVOID - high conflict risk):
+RECENTLY MODIFIED FILES (high conflict risk - AVOID these):
 {json.dumps(recent_files, indent=2)}
+
+OPTIMIZATION GUIDELINES:
+1. Split into {recommended} to {max_splits} subtasks based on natural boundaries
+2. Each additional split adds ~{calculate_overhead(2, config)/60:.1f} min overhead
+3. Only create more splits if the task genuinely has independent components
+4. Fewer splits is better if components are tightly coupled
+5. Consider: Is the overhead worth it for this split?
 
 CRITICAL REQUIREMENTS FOR CONFLICT-FREE SPLITTING:
 1. Each subtask MUST modify COMPLETELY DIFFERENT FILES
 2. NO file should appear in more than one subtask's files_to_modify or files_to_create
-3. If a task cannot be split without file overlap, return fewer subtasks or just one
+3. If a task cannot be split without file overlap, return fewer subtasks
 4. Prefer creating NEW files over modifying existing shared files
 5. Tests should be in separate test files per subtask
 6. Shared utilities should be handled by ONE subtask only, others import it
@@ -178,10 +537,12 @@ CONFLICT PREVENTION STRATEGIES:
 
 Output JSON format:
 {{
-    "analysis": "Brief analysis of the task",
+    "analysis": "Brief analysis of the task and splitting strategy",
+    "optimal_splits": <number>,
+    "splitting_rationale": "Why this number of splits is optimal",
     "conflict_risk": "LOW|MEDIUM|HIGH",
     "can_parallelize": true/false,
-    "reason_if_not": "Why it can't be safely parallelized",
+    "reason_if_not": "Why it can't be safely parallelized (if applicable)",
     "subtasks": [
         {{
             "name": "short-branch-name",
@@ -189,9 +550,10 @@ Output JSON format:
             "files_to_modify": ["file1.py"],
             "files_to_create": ["new_file.py"],
             "files_to_read_only": ["shared_config.py"],
-            "prompt": "Detailed prompt for Claude Code - MUST mention which files to touch",
+            "prompt": "Detailed prompt for Claude Code - MUST specify exact files to touch",
             "dependencies": [],
-            "estimated_complexity": "low|medium|high"
+            "estimated_complexity": "low|medium|high",
+            "estimated_minutes": <number>
         }}
     ],
     "file_ownership": {{"file.py": "subtask-name"}},
@@ -204,22 +566,21 @@ Output JSON format:
     try:
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[
                 {"role": "user", "content": prompt}
             ]
         )
 
-        # Extract JSON from response
         response_text = message.content[0].text
 
-        # Try to find JSON in response
+        # Extract JSON from response
         import re
         json_match = re.search(r'\{[\s\S]*\}', response_text)
         if json_match:
             result = json.loads(json_match.group())
 
-            # CRITICAL: Validate no file conflicts in the proposed split
+            # Validate no file conflicts
             subtasks = result.get('subtasks', [])
             if subtasks:
                 validation = validate_no_file_conflicts(subtasks)
@@ -229,11 +590,21 @@ Output JSON format:
                     result['conflict_risk'] = 'HIGH'
                     result['validation_failed'] = True
                     result['conflict_details'] = validation['conflicts']
-
-                    # Try to fix by removing conflicting subtasks
                     print("WARNING: File conflicts detected in proposed split!", file=sys.stderr)
                     for conflict in validation['conflicts']:
                         print(f"  - {conflict['file']}: {conflict['subtask1']} vs {conflict['subtask2']}", file=sys.stderr)
+
+            # Add overhead analysis to result
+            result['overhead_analysis'] = asdict(overhead_analysis)
+            result['complexity_analysis'] = asdict(complexity)
+
+            # Validate resource constraints
+            num_subtasks = len(subtasks)
+            resource_check = validate_resource_constraints(num_subtasks, config)
+            result['resource_validation'] = resource_check
+
+            if not resource_check['valid']:
+                result['resource_warning'] = resource_check['issues']
 
             return result
         else:
@@ -242,37 +613,49 @@ Output JSON format:
     except Exception as e:
         return {
             "error": str(e),
-            "fallback": generate_fallback_split(task)
+            "fallback": generate_fallback_split(task, overhead_analysis.recommended_splits)
         }
 
 
-def generate_fallback_split(task: str) -> list:
+def generate_fallback_split(task: str, recommended_splits: int = 2) -> list:
     """Generate a basic task split without AI."""
-    # Simple heuristic-based splitting
     keywords = {
         "auth": ["auth-backend", "auth-frontend", "auth-tests"],
         "api": ["api-endpoints", "api-validation", "api-tests"],
         "ui": ["ui-components", "ui-styles", "ui-tests"],
         "test": ["unit-tests", "integration-tests", "e2e-tests"],
         "refactor": ["refactor-core", "refactor-utils", "update-tests"],
+        "database": ["db-schema", "db-migrations", "db-queries"],
+        "frontend": ["frontend-components", "frontend-state", "frontend-styles"],
+        "backend": ["backend-routes", "backend-services", "backend-models"],
     }
 
     task_lower = task.lower()
     for key, branches in keywords.items():
         if key in task_lower:
-            return [{"name": b, "description": f"Part of: {task}"} for b in branches]
+            return [
+                {"name": b, "description": f"Part of: {task}"}
+                for b in branches[:recommended_splits]
+            ]
 
     # Default split
-    return [
+    default_splits = [
         {"name": "implementation", "description": "Core implementation"},
         {"name": "tests", "description": "Tests and validation"},
+        {"name": "integration", "description": "Integration and cleanup"},
     ]
+    return default_splits[:recommended_splits]
 
 
-def analyze_repo() -> dict:
+# ============================================================================
+# REPOSITORY ANALYSIS MODE
+# ============================================================================
+
+def analyze_repo(config: ParallelConfig = DEFAULT_CONFIG) -> dict:
     """Analyze repository for parallelization opportunities."""
     structure = get_repo_structure()
     recent = get_recent_changes()
+    complexity = analyze_complexity(structure, recent)
 
     # Find independent modules
     modules = {}
@@ -285,20 +668,44 @@ def analyze_repo() -> dict:
         modules[top_level]["files"] += len(structure[path])
         modules[top_level]["recent_changes"] += sum(1 for f in recent if f.startswith(top_level))
 
+    # Identify parallelization opportunities
+    opportunities = []
+    for module, data in modules.items():
+        if data["files"] >= config.min_files_per_subtask and data["recent_changes"] < 3:
+            opportunities.append({
+                "module": module,
+                "files": data["files"],
+                "recent_changes": data["recent_changes"],
+                "parallelization_safe": data["recent_changes"] == 0
+            })
+
+    # Sort by safety and size
+    opportunities.sort(key=lambda x: (-x["parallelization_safe"], -x["files"]))
+
     return {
-        "total_files": sum(len(v) for v in structure.values()),
+        "total_files": complexity.file_count,
+        "estimated_loc": complexity.estimated_loc,
+        "module_count": complexity.module_count,
+        "complexity_score": complexity.total_score,
         "modules": modules,
         "recent_changes": recent[:10],
-        "parallelization_opportunities": [
-            m for m, data in modules.items()
-            if data["files"] > 5 and data["recent_changes"] < 3
-        ]
+        "parallelization_opportunities": opportunities,
+        "max_recommended_parallel": complexity.max_parallel_by_structure,
+        "existing_worktrees": get_existing_worktrees(),
+        "resource_limits": {
+            "max_concurrent_sessions": config.max_concurrent_sessions,
+            "max_worktrees": config.max_worktrees
+        }
     }
 
 
+# ============================================================================
+# MAIN CLI
+# ============================================================================
+
 def main():
     parser = argparse.ArgumentParser(
-        description="AI-powered task splitting for parallel execution"
+        description="AI-powered task splitting with overhead optimization"
     )
     parser.add_argument(
         "task",
@@ -322,48 +729,114 @@ def main():
         default="text",
         help="Output format"
     )
+    parser.add_argument(
+        "--max-splits",
+        type=int,
+        default=None,
+        help="Maximum number of splits to consider"
+    )
+    parser.add_argument(
+        "--task-scope",
+        choices=["small", "medium", "large", "xlarge"],
+        default="medium",
+        help="Estimated task scope for time calculation"
+    )
+    parser.add_argument(
+        "--show-overhead",
+        action="store_true",
+        help="Show detailed overhead analysis"
+    )
 
     args = parser.parse_args()
+    config = DEFAULT_CONFIG
 
+    # Repository analysis mode
     if args.analyze_repo:
-        result = analyze_repo()
+        result = analyze_repo(config)
         if args.output == "json":
             print(json.dumps(result, indent=2))
         else:
-            print("\n=== Repository Analysis ===")
-            print(f"Total files: {result['total_files']}")
+            print("\n" + "="*60)
+            print("REPOSITORY ANALYSIS")
+            print("="*60)
+            print(f"\nTotal files: {result['total_files']}")
+            print(f"Estimated LOC: {result['estimated_loc']:,}")
+            print(f"Modules: {result['module_count']}")
+            print(f"Complexity score: {result['complexity_score']:.2f}")
+            print(f"Max recommended parallel: {result['max_recommended_parallel']}")
             print(f"\nModules:")
             for name, data in result['modules'].items():
-                print(f"  {name}: {data['files']} files, {data['recent_changes']} recent changes")
-            print(f"\nGood for parallel work: {', '.join(result['parallelization_opportunities'])}")
+                status = "✓" if data['recent_changes'] == 0 else f"⚠ {data['recent_changes']} recent"
+                print(f"  {name}: {data['files']} files [{status}]")
+            print(f"\nParallelization opportunities:")
+            for opp in result['parallelization_opportunities'][:5]:
+                safe = "SAFE" if opp['parallelization_safe'] else "CAUTION"
+                print(f"  {opp['module']}: {opp['files']} files [{safe}]")
+            print(f"\nResource limits:")
+            print(f"  Existing worktrees: {result['existing_worktrees']}")
+            print(f"  Max concurrent: {result['resource_limits']['max_concurrent_sessions']}")
         return
 
+    # Conflict check mode
     if args.check_conflicts:
         conflicts = check_branch_conflicts(args.check_conflicts)
         if args.output == "json":
             print(json.dumps(conflicts, indent=2))
         else:
             if conflicts:
-                print("\n=== Potential Conflicts ===")
+                print("\n" + "="*60)
+                print("CONFLICT ANALYSIS")
+                print("="*60)
                 for pair, files in conflicts.items():
-                    print(f"\n{pair}:")
+                    print(f"\n⚠ {pair}:")
                     for f in files:
-                        print(f"  - {f}")
+                        print(f"    - {f}")
             else:
-                print("\nNo conflicts detected between branches.")
+                print("\n✓ No conflicts detected between branches.")
         return
 
+    # Task splitting mode
     if not args.task:
         parser.print_help()
         return
 
-    # Split the task
     print(f"\nAnalyzing task: {args.task}\n")
 
+    # Gather data
     structure = get_repo_structure()
     recent = get_recent_changes()
 
-    result = split_task_with_claude(args.task, structure, recent)
+    # Analyze complexity
+    complexity = analyze_complexity(structure, recent, args.task, config)
+
+    # Estimate task time
+    estimated_time = estimate_task_time(complexity, args.task_scope)
+
+    # Determine max splits
+    max_splits = args.max_splits or complexity.max_parallel_by_structure
+
+    # Calculate optimal parallelization
+    overhead_analysis = find_optimal_splits(estimated_time, max_splits, config)
+
+    # Show overhead analysis if requested
+    if args.show_overhead or args.output == "text":
+        print("="*60)
+        print("OVERHEAD ANALYSIS")
+        print("="*60)
+        print(f"Estimated sequential time: {overhead_analysis.estimated_sequential_minutes:.0f} min")
+        print(f"Recommended splits: {overhead_analysis.recommended_splits}")
+        print(f"Break-even at: {overhead_analysis.break_even_splits} splits")
+        if overhead_analysis.is_worth_parallelizing:
+            print(f"Estimated parallel time: {overhead_analysis.estimated_parallel_minutes:.1f} min")
+            print(f"Overhead: {overhead_analysis.overhead_minutes:.1f} min")
+            print(f"Efficiency gain: {overhead_analysis.efficiency_gain_percent:.0f}%")
+        print(f"Recommendation: {overhead_analysis.reasoning}")
+        print()
+
+    # Split the task
+    result = split_task_with_claude(
+        args.task, structure, recent, complexity, overhead_analysis, config
+    )
 
     if args.output == "json":
         print(json.dumps(result, indent=2))
@@ -375,19 +848,37 @@ def main():
                 for subtask in result["fallback"]:
                     print(f"  - {subtask['name']}: {subtask['description']}")
         else:
-            print("=== Task Analysis ===")
+            print("="*60)
+            print("TASK ANALYSIS")
+            print("="*60)
             if "analysis" in result:
-                print(f"\n{result['analysis']}\n")
+                print(f"\n{result['analysis']}")
 
-            print("=== Subtasks ===")
+            if "splitting_rationale" in result:
+                print(f"\nRationale: {result['splitting_rationale']}")
+
+            print(f"\nConflict risk: {result.get('conflict_risk', 'UNKNOWN')}")
+            print(f"Can parallelize: {result.get('can_parallelize', 'unknown')}")
+
+            print("\n" + "="*60)
+            print("SUBTASKS")
+            print("="*60)
             for i, subtask in enumerate(result.get("subtasks", []), 1):
                 print(f"\n{i}. {subtask['name']}")
                 print(f"   Description: {subtask.get('description', 'N/A')}")
-                print(f"   Files to modify: {', '.join(subtask.get('files_to_modify', []))}")
+                print(f"   Files to modify: {', '.join(subtask.get('files_to_modify', [])) or 'None'}")
+                print(f"   Files to create: {', '.join(subtask.get('files_to_create', [])) or 'None'}")
                 print(f"   Complexity: {subtask.get('estimated_complexity', 'unknown')}")
+                if 'estimated_minutes' in subtask:
+                    print(f"   Estimated time: {subtask['estimated_minutes']} min")
+
+            if result.get("validation", {}).get("valid") == False:
+                print("\n⚠ WARNING: File conflicts detected!")
+                for conflict in result.get("conflict_details", []):
+                    print(f"   {conflict['file']}: {conflict['subtask1']} vs {conflict['subtask2']}")
 
             if "merge_order" in result:
-                print(f"\nMerge order: {' -> '.join(result['merge_order'])}")
+                print(f"\nMerge order: {' → '.join(result['merge_order'])}")
 
             if result.get("potential_conflicts"):
                 print(f"\nPotential conflicts: {', '.join(result['potential_conflicts'])}")
@@ -395,15 +886,31 @@ def main():
             if "integration_notes" in result:
                 print(f"\nIntegration: {result['integration_notes']}")
 
-            # Print commands to execute
-            print("\n=== Commands to Execute ===")
+            # Resource validation
+            if result.get("resource_warning"):
+                print("\n⚠ RESOURCE WARNINGS:")
+                for warning in result["resource_warning"]:
+                    print(f"   - {warning}")
+
+            # Print commands
             subtasks = result.get("subtasks", [])
-            if subtasks:
+            if subtasks and result.get('can_parallelize', False):
+                print("\n" + "="*60)
+                print("COMMANDS TO EXECUTE")
+                print("="*60)
                 branch_names = [s["name"] for s in subtasks]
                 print(f"\n# Create worktrees:")
                 print(f"setup-worktree.sh {' '.join(branch_names)}")
                 print(f"\n# Run in parallel:")
                 print(f"run-parallel.sh --tasks \"{','.join(branch_names)}\"")
+
+                # Show efficiency summary
+                oa = result.get('overhead_analysis', {})
+                if oa:
+                    print(f"\n# Expected efficiency:")
+                    print(f"#   Sequential: ~{oa.get('estimated_sequential_minutes', 0):.0f} min")
+                    print(f"#   Parallel:   ~{oa.get('estimated_parallel_minutes', 0):.0f} min")
+                    print(f"#   Savings:    ~{oa.get('efficiency_gain_percent', 0):.0f}%")
 
 
 if __name__ == "__main__":
