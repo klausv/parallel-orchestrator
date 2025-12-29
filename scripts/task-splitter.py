@@ -66,6 +66,249 @@ DEFAULT_CONFIG = ParallelConfig()
 
 
 # ============================================================================
+# AGENT AND SKILL MATCHING
+# ============================================================================
+
+@dataclass
+class AgentRecommendation:
+    """Recommended agent and skill for a subtask."""
+    agent: str
+    skill: str
+    confidence: float  # 0.0 - 1.0
+    rationale: str
+
+
+# Agent matching configuration - patterns to agent/skill mappings
+AGENT_MATCHING = {
+    # Task description patterns → agent
+    "task_patterns": {
+        # Security & Auth
+        r"auth|login|session|jwt|oauth|permission|rbac|acl": {
+            "agent": "security-engineer",
+            "skill": "/sc:implement --focus security",
+            "rationale": "Security-sensitive authentication/authorization code"
+        },
+        # Backend API
+        r"api|endpoint|rest|graphql|route|controller|middleware": {
+            "agent": "backend-architect",
+            "skill": "/sc:implement",
+            "rationale": "Backend API and routing logic"
+        },
+        # Frontend UI
+        r"component|ui|frontend|react|vue|svelte|css|tailwind|style": {
+            "agent": "frontend-architect",
+            "skill": "/ui:design",
+            "rationale": "Frontend UI components and styling"
+        },
+        # Testing
+        r"test|spec|coverage|mock|fixture|e2e|integration|unit": {
+            "agent": "quality-engineer",
+            "skill": "/sc:test",
+            "rationale": "Test implementation and coverage"
+        },
+        # Refactoring
+        r"refactor|cleanup|debt|reorganize|restructure|simplify": {
+            "agent": "refactoring-expert",
+            "skill": "/sc:improve",
+            "rationale": "Code refactoring and cleanup"
+        },
+        # Debugging
+        r"bug|fix|error|debug|issue|crash|exception|trace": {
+            "agent": "root-cause-analyst",
+            "skill": "/sc:troubleshoot",
+            "rationale": "Bug investigation and fixing"
+        },
+        # Documentation
+        r"doc|readme|comment|jsdoc|docstring|wiki|guide": {
+            "agent": "technical-writer",
+            "skill": "/sc:document",
+            "rationale": "Documentation and comments"
+        },
+        # Performance
+        r"perf|optim|speed|cache|lazy|memo|bundle|profil": {
+            "agent": "performance-engineer",
+            "skill": "/sc:analyze --focus performance",
+            "rationale": "Performance optimization"
+        },
+        # Database
+        r"database|db|sql|query|migration|schema|model|orm": {
+            "agent": "backend-architect",
+            "skill": "/sc:implement",
+            "rationale": "Database operations and models"
+        },
+        # DevOps/Deployment
+        r"deploy|docker|ci|cd|pipeline|kubernetes|infra|cloud": {
+            "agent": "devops-architect",
+            "skill": "/sc:build",
+            "rationale": "DevOps and deployment configuration"
+        },
+        # Architecture
+        r"architect|design|structure|pattern|system|module": {
+            "agent": "system-architect",
+            "skill": "/sc:design",
+            "rationale": "System architecture and design"
+        },
+    },
+    # File path patterns → agent
+    "file_patterns": {
+        r"\.test\.|\.spec\.|__tests__|tests/": {
+            "agent": "quality-engineer",
+            "skill": "/sc:test"
+        },
+        r"\.md$|docs/|documentation/": {
+            "agent": "technical-writer",
+            "skill": "/sc:document"
+        },
+        r"components/|pages/|views/|ui/": {
+            "agent": "frontend-architect",
+            "skill": "/ui:design"
+        },
+        r"api/|routes/|controllers/|endpoints/": {
+            "agent": "backend-architect",
+            "skill": "/sc:implement"
+        },
+        r"auth/|security/|permissions/": {
+            "agent": "security-engineer",
+            "skill": "/sc:implement --focus security"
+        },
+        r"models/|schema/|migrations/|db/": {
+            "agent": "backend-architect",
+            "skill": "/sc:implement"
+        },
+        r"hooks/|utils/|helpers/|lib/": {
+            "agent": "refactoring-expert",
+            "skill": "/sc:improve"
+        },
+        r"config/|\.env|settings/": {
+            "agent": "devops-architect",
+            "skill": "/sc:build"
+        },
+    },
+    # Complexity-based adjustments
+    "complexity_overrides": {
+        "high": {
+            # For high complexity, prefer more specialized agents
+            "default_agent": "system-architect",
+            "default_skill": "/sc:design"
+        }
+    }
+}
+
+
+def match_agent_and_skill(
+    subtask: Dict,
+    task_description: str = "",
+    complexity: str = "medium"
+) -> AgentRecommendation:
+    """
+    Match a subtask to the optimal agent and skill based on content and files.
+
+    Returns AgentRecommendation with agent, skill, confidence, and rationale.
+    """
+    import re
+
+    name = subtask.get('name', '').lower()
+    description = subtask.get('description', '').lower()
+    files_modify = subtask.get('files_to_modify', [])
+    files_create = subtask.get('files_to_create', [])
+    all_files = files_modify + files_create
+    prompt = subtask.get('prompt', '').lower()
+
+    # Combined text for pattern matching
+    combined_text = f"{name} {description} {prompt} {task_description}".lower()
+
+    matches = []
+
+    # Check task description patterns
+    for pattern, config in AGENT_MATCHING["task_patterns"].items():
+        if re.search(pattern, combined_text, re.IGNORECASE):
+            matches.append({
+                "agent": config["agent"],
+                "skill": config["skill"],
+                "rationale": config.get("rationale", "Pattern match"),
+                "confidence": 0.8,
+                "source": "task_pattern"
+            })
+
+    # Check file path patterns
+    for file in all_files:
+        for pattern, config in AGENT_MATCHING["file_patterns"].items():
+            if re.search(pattern, file, re.IGNORECASE):
+                matches.append({
+                    "agent": config["agent"],
+                    "skill": config["skill"],
+                    "rationale": f"File pattern match: {file}",
+                    "confidence": 0.7,
+                    "source": "file_pattern"
+                })
+
+    # If no matches, use defaults based on complexity
+    if not matches:
+        if complexity == "high":
+            override = AGENT_MATCHING["complexity_overrides"]["high"]
+            return AgentRecommendation(
+                agent=override["default_agent"],
+                skill=override["default_skill"],
+                confidence=0.4,
+                rationale="High complexity task - using system architect"
+            )
+        return AgentRecommendation(
+            agent="general-purpose",
+            skill="/sc:implement",
+            confidence=0.3,
+            rationale="No specific pattern matched - using general agent"
+        )
+
+    # Score and rank matches
+    agent_scores = {}
+    for match in matches:
+        agent = match["agent"]
+        if agent not in agent_scores:
+            agent_scores[agent] = {
+                "skill": match["skill"],
+                "score": 0,
+                "rationales": []
+            }
+        agent_scores[agent]["score"] += match["confidence"]
+        agent_scores[agent]["rationales"].append(match["rationale"])
+
+    # Find best match
+    best_agent = max(agent_scores.keys(), key=lambda a: agent_scores[a]["score"])
+    best_data = agent_scores[best_agent]
+
+    # Normalize confidence
+    confidence = min(best_data["score"] / 2.0, 1.0)  # Cap at 1.0
+
+    return AgentRecommendation(
+        agent=best_agent,
+        skill=best_data["skill"],
+        confidence=confidence,
+        rationale="; ".join(best_data["rationales"][:2])  # Top 2 rationales
+    )
+
+
+def enrich_subtasks_with_agents(
+    subtasks: List[Dict],
+    task_description: str = ""
+) -> List[Dict]:
+    """
+    Enrich subtasks with recommended agents and skills.
+
+    Modifies subtasks in-place and returns them.
+    """
+    for subtask in subtasks:
+        complexity = subtask.get('estimated_complexity', 'medium')
+        recommendation = match_agent_and_skill(subtask, task_description, complexity)
+
+        subtask['recommended_agent'] = recommendation.agent
+        subtask['recommended_skill'] = recommendation.skill
+        subtask['agent_confidence'] = recommendation.confidence
+        subtask['agent_rationale'] = recommendation.rationale
+
+    return subtasks
+
+
+# ============================================================================
 # OVERHEAD AND EFFICIENCY CALCULATIONS
 # ============================================================================
 
@@ -594,6 +837,18 @@ Output JSON format:
                     for conflict in validation['conflicts']:
                         print(f"  - {conflict['file']}: {conflict['subtask1']} vs {conflict['subtask2']}", file=sys.stderr)
 
+                # Enrich subtasks with agent/skill recommendations
+                result['subtasks'] = enrich_subtasks_with_agents(subtasks, task)
+
+                # Create agent summary
+                agent_summary = {}
+                for st in result['subtasks']:
+                    agent = st.get('recommended_agent', 'general-purpose')
+                    if agent not in agent_summary:
+                        agent_summary[agent] = []
+                    agent_summary[agent].append(st.get('name', 'unknown'))
+                result['agent_assignments'] = agent_summary
+
             # Add overhead analysis to result
             result['overhead_analysis'] = asdict(overhead_analysis)
             result['complexity_analysis'] = asdict(complexity)
@@ -861,7 +1116,7 @@ def main():
             print(f"Can parallelize: {result.get('can_parallelize', 'unknown')}")
 
             print("\n" + "="*60)
-            print("SUBTASKS")
+            print("SUBTASKS WITH AGENT RECOMMENDATIONS")
             print("="*60)
             for i, subtask in enumerate(result.get("subtasks", []), 1):
                 print(f"\n{i}. {subtask['name']}")
@@ -871,6 +1126,26 @@ def main():
                 print(f"   Complexity: {subtask.get('estimated_complexity', 'unknown')}")
                 if 'estimated_minutes' in subtask:
                     print(f"   Estimated time: {subtask['estimated_minutes']} min")
+                # Agent recommendation
+                agent = subtask.get('recommended_agent', 'general-purpose')
+                skill = subtask.get('recommended_skill', '/sc:implement')
+                confidence = subtask.get('agent_confidence', 0)
+                rationale = subtask.get('agent_rationale', '')
+                conf_bar = "█" * int(confidence * 5) + "░" * (5 - int(confidence * 5))
+                print(f"   🤖 Agent: {agent} [{conf_bar}] {confidence:.0%}")
+                print(f"   ⚡ Skill: {skill}")
+                if rationale:
+                    print(f"   💡 Why: {rationale}")
+
+            # Agent summary
+            if result.get('agent_assignments'):
+                print("\n" + "="*60)
+                print("AGENT ASSIGNMENT SUMMARY")
+                print("="*60)
+                for agent, tasks in result['agent_assignments'].items():
+                    print(f"\n  {agent}:")
+                    for task_name in tasks:
+                        print(f"    → {task_name}")
 
             if result.get("validation", {}).get("valid") == False:
                 print("\n⚠ WARNING: File conflicts detected!")
@@ -904,6 +1179,31 @@ def main():
                 print(f"\n# Run in parallel:")
                 print(f"run-parallel.sh --tasks \"{','.join(branch_names)}\"")
 
+                # Show agent-specific tmux commands
+                print(f"\n# Or run with specialized agents (recommended):")
+                print("tmux new-session -d -s claude-parallel")
+                for i, subtask in enumerate(subtasks):
+                    agent = subtask.get('recommended_agent', 'general-purpose')
+                    skill = subtask.get('recommended_skill', '/sc:implement')
+                    name = subtask.get('name', f'task-{i}')
+                    worktree_path = f"../{name}"
+
+                    if i == 0:
+                        print(f"tmux send-keys 'cd {worktree_path} && claude --agent {agent}' Enter")
+                    else:
+                        print(f"tmux new-window -t claude-parallel -n '{name}'")
+                        print(f"tmux send-keys -t claude-parallel:'{name}' 'cd {worktree_path} && claude --agent {agent}' Enter")
+
+                print("tmux attach -t claude-parallel")
+
+                # Show skill invocation for each task
+                print(f"\n# Initial prompts per agent:")
+                for subtask in subtasks:
+                    name = subtask.get('name', 'unknown')
+                    skill = subtask.get('recommended_skill', '/sc:implement')
+                    desc = subtask.get('description', '')[:50]
+                    print(f"#   {name}: {skill} \"{desc}...\"")
+
                 # Show efficiency summary
                 oa = result.get('overhead_analysis', {})
                 if oa:
@@ -911,6 +1211,12 @@ def main():
                     print(f"#   Sequential: ~{oa.get('estimated_sequential_minutes', 0):.0f} min")
                     print(f"#   Parallel:   ~{oa.get('estimated_parallel_minutes', 0):.0f} min")
                     print(f"#   Savings:    ~{oa.get('efficiency_gain_percent', 0):.0f}%")
+
+                    # Calculate potential additional gain from specialization
+                    num_specialized = sum(1 for s in subtasks if s.get('agent_confidence', 0) > 0.6)
+                    if num_specialized > 0:
+                        specialization_bonus = num_specialized * 5  # ~5% per specialized agent
+                        print(f"#   + Specialization bonus: ~{specialization_bonus}% (est.)")
 
 
 if __name__ == "__main__":
