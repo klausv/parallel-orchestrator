@@ -1,0 +1,247 @@
+# Parallel Claude Tasks Workflow
+# Copy this file to your project's .github/workflows/ directory
+# Trigger via GitHub Mobile or Tasker webhook
+
+name: Parallel Claude Tasks
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_description:
+        description: 'Main task to execute (will be split into parallel subtasks)'
+        required: true
+        type: string
+      num_workers:
+        description: 'Number of parallel workers'
+        required: false
+        default: '2'
+        type: choice
+        options: ['1', '2', '3']
+      auto_merge:
+        description: 'Automatically create PRs for completed tasks'
+        required: false
+        default: true
+        type: boolean
+      notify_on_complete:
+        description: 'Send notification when complete'
+        required: false
+        default: true
+        type: boolean
+
+  # Can also trigger via issue comment
+  issue_comment:
+    types: [created]
+
+env:
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+jobs:
+  # Parse the task and determine parallel subtasks
+  analyze:
+    runs-on: ubuntu-latest
+    outputs:
+      subtasks: ${{ steps.split.outputs.subtasks }}
+      task_count: ${{ steps.split.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install anthropic
+
+      - name: Analyze and split task
+        id: split
+        run: |
+          # Get repo structure for context
+          STRUCTURE=$(find . -type f -name "*.py" -o -name "*.js" -o -name "*.ts" | head -50 | jq -R -s 'split("\n") | map(select(length > 0))')
+
+          # Use Claude to split the task
+          python3 << 'EOF'
+          import os
+          import json
+          import anthropic
+
+          task = "${{ inputs.task_description }}"
+          num_workers = int("${{ inputs.num_workers }}")
+
+          client = anthropic.Anthropic()
+
+          response = client.messages.create(
+              model="claude-sonnet-4-20250514",
+              max_tokens=2048,
+              messages=[{
+                  "role": "user",
+                  "content": f"""Split this task into {num_workers} independent subtasks for parallel execution.
+
+          Task: {task}
+
+          Output ONLY valid JSON array like:
+          [
+              {{"name": "subtask-1", "prompt": "Detailed instructions for subtask 1"}},
+              {{"name": "subtask-2", "prompt": "Detailed instructions for subtask 2"}}
+          ]
+
+          Requirements:
+          - Each subtask should modify different files
+          - Each should be completable independently
+          - Names should be valid git branch names (lowercase, hyphens ok)"""
+              }]
+          )
+
+          # Parse response
+          import re
+          text = response.content[0].text
+          match = re.search(r'\[[\s\S]*\]', text)
+          if match:
+              subtasks = json.loads(match.group())
+          else:
+              # Fallback to simple split
+              subtasks = [
+                  {"name": f"task-{i+1}", "prompt": f"Part {i+1} of: {task}"}
+                  for i in range(num_workers)
+              ]
+
+          print(f"subtasks={json.dumps(subtasks)}")
+          print(f"count={len(subtasks)}")
+
+          # Set outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"subtasks={json.dumps(subtasks)}\n")
+              f.write(f"count={len(subtasks)}\n")
+          EOF
+
+  # Execute subtasks in parallel
+  execute:
+    needs: analyze
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        subtask: ${{ fromJson(needs.analyze.outputs.subtasks) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code
+
+      - name: Create branch
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git checkout -b "ai/${{ matrix.subtask.name }}"
+
+      - name: Execute subtask
+        run: |
+          # Run Claude Code with the subtask prompt
+          claude --dangerously-skip-permissions "${{ matrix.subtask.prompt }}"
+
+      - name: Commit changes
+        run: |
+          git add -A
+          git diff --staged --quiet || git commit -m "AI: ${{ matrix.subtask.name }}
+
+          Automated changes from parallel task execution.
+
+          Original task: ${{ inputs.task_description }}
+          Subtask: ${{ matrix.subtask.name }}"
+
+      - name: Push branch
+        run: |
+          git push origin "ai/${{ matrix.subtask.name }}"
+
+      - name: Create Pull Request
+        if: inputs.auto_merge
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: "ai/${{ matrix.subtask.name }}"
+          title: "AI: ${{ matrix.subtask.name }}"
+          body: |
+            ## Automated PR from Parallel Task Execution
+
+            **Original Task**: ${{ inputs.task_description }}
+            **Subtask**: ${{ matrix.subtask.name }}
+
+            ### Prompt Used
+            ```
+            ${{ matrix.subtask.prompt }}
+            ```
+
+            ---
+            Generated by [parallel-orchestrator](https://github.com/klaus/parallel-orchestrator)
+
+  # Aggregate results and send notification
+  notify:
+    needs: [analyze, execute]
+    runs-on: ubuntu-latest
+    if: always() && inputs.notify_on_complete
+    steps:
+      - name: Check results
+        id: results
+        run: |
+          echo "Task: ${{ inputs.task_description }}"
+          echo "Subtasks: ${{ needs.analyze.outputs.task_count }}"
+          echo "Status: ${{ needs.execute.result }}"
+
+      - name: Send notification (Pushover)
+        if: env.PUSHOVER_TOKEN != ''
+        env:
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+        run: |
+          curl -s \
+            --form-string "token=$PUSHOVER_TOKEN" \
+            --form-string "user=$PUSHOVER_USER" \
+            --form-string "title=Parallel Task Complete" \
+            --form-string "message=Task: ${{ inputs.task_description }}
+          Status: ${{ needs.execute.result }}
+          Subtasks: ${{ needs.analyze.outputs.task_count }}" \
+            https://api.pushover.net/1/messages.json
+
+      - name: Create summary issue
+        uses: peter-evans/create-issue-from-file@v4
+        if: needs.execute.result == 'success'
+        with:
+          title: "Parallel Task Complete: ${{ inputs.task_description }}"
+          content-filepath: .github/ISSUE_TEMPLATE/task-complete.md
+          labels: automated, ai-task
+
+  # Optional: Auto-merge if all tests pass
+  auto-merge:
+    needs: [analyze, execute]
+    runs-on: ubuntu-latest
+    if: needs.execute.result == 'success' && inputs.auto_merge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List created PRs
+        run: |
+          echo "PRs created for parallel tasks:"
+          gh pr list --search "AI:" --json number,title,url
+
+      - name: Summary
+        run: |
+          echo "## Parallel Task Execution Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Task**: ${{ inputs.task_description }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Subtasks**: ${{ needs.analyze.outputs.task_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Created PRs" >> $GITHUB_STEP_SUMMARY
+          gh pr list --search "AI:" --json number,title,url --template '{{range .}}- [#{{.number}}]({{.url}}) {{.title}}{{"\n"}}{{end}}' >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
