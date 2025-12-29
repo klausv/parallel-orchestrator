@@ -21,7 +21,7 @@ from typing import List, Optional
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from falsification import (
+from parallel_test import (
     FalsificationConfig,
     HypothesisManager,
     WorktreeOrchestrator,

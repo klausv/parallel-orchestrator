@@ -1,4 +1,4 @@
-# Falsification-Debugger Implementation Summary
+# Parallel-Test Implementation Summary
 
 **Completion Date**: 2025-12-30
 **Status**: ✅ **COMPLETE**
@@ -7,7 +7,7 @@
 
 ## Overview
 
-Implemented a comprehensive **Falsification-Debugger Agent** that systematically debugs bugs through parallel hypothesis testing with SuperClaude agent integration.
+Implemented a comprehensive **Parallel-Test Agent** that systematically debugs bugs through parallel hypothesis testing with SuperClaude agent integration.
 
 ### Complete Workflow
 
@@ -16,7 +16,7 @@ Implemented a comprehensive **Falsification-Debugger Agent** that systematically
    ↓
 2. test_hypothesis.py (hypothesis testing - identify bug)
    ↓
-3. falsification-debugger (analyze + implement fix)
+3. parallel-test (analyze + implement fix)
    ├─ /sc:analyze     - Analyze root cause
    ├─ /sc:troubleshoot - Diagnose error patterns
    ├─ /sc:design      - Design fix architecture
@@ -29,7 +29,7 @@ Implemented a comprehensive **Falsification-Debugger Agent** that systematically
 
 ### 1. Core Modules (Python)
 
-**Location**: `/home/klaus/klauspython/parallel-orchestrator/scripts/falsification/`
+**Location**: `/home/klaus/klauspython/parallel-orchestrator/scripts/parallel-test/`
 
 #### `config.py` - Configuration Management
 - `FalsificationConfig` - Main configuration dataclass
@@ -103,9 +103,9 @@ Implemented a comprehensive **Falsification-Debugger Agent** that systematically
 
 ### 2. Main Entry Point
 
-**Location**: `/home/klaus/klauspython/parallel-orchestrator/scripts/falsification/test_hypothesis.py`
+**Location**: `/home/klaus/klauspython/parallel-orchestrator/scripts/parallel-test/test_hypothesis.py`
 
-`FalsificationDebugger` class orchestrates complete workflow:
+`ParallelTestDebugger` class orchestrates complete workflow:
 
 1. **Phase 1**: Generate hypotheses (delegates to `/sc:root-cause`)
 2. **Phase 2**: Rank and filter hypotheses
@@ -124,12 +124,12 @@ python test_hypothesis.py --max-hypotheses 3 "Bug description"
 
 ### 3. Agent Definition
 
-**Location**: `~/.claude/agents/falsification-debugger.md`
+**Location**: `~/.claude/agents/parallel-test.md`
 
 Complete agent specification with:
 - **Frontmatter**: Trigger conditions and metadata
 - **Behavior**: 6-phase debugging workflow
-- **Commands**: `/falsify` with multiple options
+- **Commands**: `/parallel-test` with multiple options
 - **Agent Integration**: Delegation to SuperClaude agents
 - **Configuration**: Customizable settings
 - **Best Practices**: Usage guidelines
@@ -154,7 +154,7 @@ Comprehensive configuration covering:
 - Analysis workflow (analyze, troubleshoot, design, implement phases)
 - Logging and session management
 
-#### `docs/falsification-debugger-architecture.md`
+#### `docs/parallel-test-architecture.md`
 Detailed architecture documentation (moved from Søknader/):
 - Component architecture diagrams
 - Data flow for typical session
@@ -214,7 +214,7 @@ After identifying root cause:
 
 ```
 /home/klaus/klauspython/parallel-orchestrator/
-├── scripts/falsification/
+├── scripts/parallel-test/
 │   ├── __init__.py                    # Module exports
 │   ├── config.py                      # Configuration & data models
 │   ├── hypothesis_manager.py          # FR1: Hypothesis management
@@ -228,13 +228,13 @@ After identifying root cause:
 │   └── falsification_config.yaml      # Configuration file
 │
 ├── docs/
-│   ├── falsification-debugger-architecture.md  # Architecture docs
+│   ├── parallel-test-architecture.md  # Architecture docs
 │   └── parallel-tasks-diagram.md      # (existing)
 │
 └── IMPLEMENTATION_SUMMARY.md          # This file
 
 ~/.claude/agents/
-└── falsification-debugger.md          # Agent definition
+└── parallel-test.md                   # Agent definition
 ```
 
 ---
@@ -243,26 +243,26 @@ After identifying root cause:
 
 ### Basic Session
 ```bash
-python scripts/falsification/test_hypothesis.py "API returns 500 errors randomly under load"
+python scripts/parallel-test/test_hypothesis.py "API returns 500 errors randomly under load"
 ```
 
 ### Analysis Only (No Tests)
 ```bash
-python scripts/falsification/test_hypothesis.py \
+python scripts/parallel-test/test_hypothesis.py \
   --analyze-only \
   "Database connection pool exhaustion"
 ```
 
 ### Sequential Testing (No Parallel)
 ```bash
-python scripts/falsification/test_hypothesis.py \
+python scripts/parallel-test/test_hypothesis.py \
   --no-parallel \
   "Auth service randomly rejects sessions"
 ```
 
 ### With Custom Settings
 ```bash
-python scripts/falsification/test_hypothesis.py \
+python scripts/parallel-test/test_hypothesis.py \
   --max-hypotheses 3 \
   "Cache invalidation causing stale data"
 ```
@@ -299,12 +299,12 @@ Break-Even:             Tests must be >20s for parallelization benefit
 
 1. **orchestrate.sh** - Run tasks in parallel
 2. **test_hypothesis.py** - Test hypotheses in parallel (identify bug)
-3. **falsification-debugger** - Analyze + implement fix (NEW)
+3. **parallel-test** - Analyze + implement fix (NEW)
 
 Each stage leverages the previous:
 - Task orchestrator creates worktrees for parallel work
 - Hypothesis tester creates worktrees for isolated testing
-- Falsification debugger reuses same infrastructure
+- Parallel-test debugger reuses same infrastructure
 
 ---
 
@@ -313,7 +313,7 @@ Each stage leverages the previous:
 ### 1. Test the Implementation
 ```bash
 cd ~/klauspython/parallel-orchestrator
-python scripts/falsification/test_hypothesis.py \
+python scripts/parallel-test/test_hypothesis.py \
   "Test bug description"
 ```
 
@@ -325,9 +325,9 @@ Edit `config/falsification_config.yaml` to adjust:
 - Logging levels
 
 ### 3. Integrate with Your Project
-Copy the falsification module to your project:
+Copy the parallel-test module to your project:
 ```bash
-cp -r scripts/falsification /path/to/your/project/
+cp -r scripts/parallel-test /path/to/your/project/
 cp config/falsification_config.yaml /path/to/your/project/
 ```
 
@@ -374,17 +374,17 @@ Ensure these agents are available:
 4. ✅ **SuperClaude Integration** - Delegation to /sc:analyze, /sc:troubleshoot, /sc:design, /sc:implement
 5. ✅ **Session Persistence** - Memory MCP integration for resumable sessions
 6. ✅ **Configuration System** - YAML-based, extensible settings
-7. ✅ **Agent Definition** - Complete `/falsify` command with documentation
+7. ✅ **Agent Definition** - Complete `/parallel-test` command with documentation
 8. ✅ **Comprehensive Documentation** - Architecture docs, usage examples, best practices
 
 ---
 
 ## References
 
-- **Architecture**: `docs/falsification-debugger-architecture.md`
-- **Agent Definition**: `~/.claude/agents/falsification-debugger.md`
+- **Architecture**: `docs/parallel-test-architecture.md`
+- **Agent Definition**: `~/.claude/agents/parallel-test.md`
 - **Configuration**: `config/falsification_config.yaml`
-- **Main Script**: `scripts/falsification/test_hypothesis.py`
+- **Main Script**: `scripts/parallel-test/test_hypothesis.py`
 - **Parallel Orchestrator**: Original `orchestrate.sh` for task execution
 
 ---

@@ -1,8 +1,8 @@
-# Falsification-Debugger Quick Start Guide
+# Parallel-Test Quick Start Guide
 
 ## What Is This?
 
-The **Falsification-Debugger** is a systematic bug debugging tool that:
+The **Parallel-Test** tool is a systematic bug debugging system that:
 
 1. **Generates hypotheses** about root causes (delegates to `/sc:root-cause`)
 2. **Tests hypotheses in parallel** using git worktrees
@@ -37,43 +37,34 @@ cat ~/.claude/agents/falsification-debugger.md
 ### Simple Bug Debugging
 
 ```bash
-python scripts/falsification/test_hypothesis.py "Your bug description"
+/parallel-test "Your bug description"
 ```
 
 **Example**:
 ```bash
-python scripts/falsification/test_hypothesis.py \
-  "API returns 500 errors randomly under high load"
+/parallel-test "API returns 500 errors randomly under high load"
 ```
 
 ### With Options
 
 **Analyze without running tests**:
 ```bash
-python scripts/falsification/test_hypothesis.py \
-  --analyze-only \
-  "Bug description"
+/parallel-test --analyze-only "Bug description"
 ```
 
 **Force sequential (no parallelization)**:
 ```bash
-python scripts/falsification/test_hypothesis.py \
-  --no-parallel \
-  "Bug description"
+/parallel-test --no-parallel "Bug description"
 ```
 
 **Limit hypotheses tested**:
 ```bash
-python scripts/falsification/test_hypothesis.py \
-  --max-hypotheses 3 \
-  "Bug description"
+/parallel-test --max-hypotheses 3 "Bug description"
 ```
 
 **Verbose logging**:
 ```bash
-python scripts/falsification/test_hypothesis.py \
-  --verbose \
-  "Bug description"
+/parallel-test --verbose "Bug description"
 ```
 
 ---
@@ -373,8 +364,7 @@ python scripts/falsification/test_hypothesis.py \
 
 1. **Run your first session**:
    ```bash
-   python scripts/falsification/test_hypothesis.py \
-     "Describe a bug you need to debug"
+   /parallel-test "Describe a bug you need to debug"
    ```
 
 2. **Review the results** and supported hypotheses
