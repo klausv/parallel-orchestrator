@@ -1,0 +1,115 @@
+# Falsification Debugger Configuration
+# Reference: docs/falsification-debugger-architecture.md
+
+hypothesis_management:
+  max_concurrent: 5           # Maximum hypotheses to test simultaneously
+  min_hypotheses: 2           # Minimum hypotheses before starting tests
+
+  ranking_weights:
+    probability: 0.5          # Weight for likelihood score
+    impact: 0.3               # Weight for severity score
+    complexity: -0.2          # Weight for test complexity (negative = prefer simple)
+
+  validation_rules:
+    require_test_strategy: true
+    require_expected_behavior: true
+    min_test_time: 1.0        # Minimum seconds for valid test
+
+worktree_orchestration:
+  base_dir: "../worktrees"    # Relative to project root
+  branch_prefix: "hyp"        # Branches: hyp-1, hyp-2, ...
+  auto_cleanup: true          # Cleanup after testing
+  preserve_on_error: false    # Keep worktrees if tests fail (for debugging)
+
+test_execution:
+  default_timeout: 300        # Seconds (5 minutes)
+  min_parallel_time: 60       # Only parallelize if test >= 60s
+  max_concurrent_tests: 5     # Maximum tests running simultaneously
+  capture_stdout: true
+  capture_stderr: true
+  collect_metrics: true
+
+  overhead:
+    worktree_creation: 8.0    # Seconds
+    environment_setup: 5.0    # Seconds
+    cleanup: 3.0              # Seconds
+
+results_analysis:
+  confidence_threshold: 0.7   # Minimum confidence for definitive result
+  session_persistence: true   # Use memory MCP
+  report_format: "markdown"   # markdown | json | text
+
+  classification_rules:
+    falsified:
+      exit_code: 0
+      min_confidence: 0.7
+    supported:
+      exit_code: [1, 2]       # Non-zero indicates bug reproduced
+      min_confidence: 0.7
+    inconclusive:
+      conditions:
+        - timeout
+        - error
+        - confidence < 0.7
+
+agent_integration:
+  # SuperClaude Agent Integration
+  root_cause_analyst:
+    enabled: true
+    purpose: "Generate initial hypothesis pool"
+    agent_skill: "/sc:root-cause"
+
+  sequential_thinking_mcp:
+    enabled: true
+    use_for_ranking: true
+    purpose: "Structured reasoning for hypothesis ranking"
+
+  quality_engineer:
+    enabled: true
+    validate_tests: true
+    purpose: "Validate test quality and coverage"
+
+  parallel_orchestrator:
+    enabled: true
+    scripts_path: "~/klauspython/parallel-orchestrator/scripts"
+    purpose: "Leverage existing worktree infrastructure"
+
+  memory_mcp:
+    enabled: true
+    session_prefix: "falsification"
+    purpose: "Session persistence and state management"
+
+# Analysis and Implementation Workflow
+analysis_workflow:
+  analyze_tool:
+    enabled: true
+    agent_skill: "/sc:analyze"
+    purpose: "Comprehensive code analysis of supported hypothesis"
+
+  troubleshoot_tool:
+    enabled: true
+    agent_skill: "/sc:troubleshoot"
+    purpose: "Diagnose and debug the identified root cause"
+
+  design_tool:
+    enabled: true
+    agent_skill: "/sc:design"
+    purpose: "Design fix architecture and solution approach"
+
+  implement_tool:
+    enabled: true
+    agent_skill: "/sc:implement"
+    purpose: "Implement the proposed solution"
+
+# Logging
+logging:
+  level: "INFO"               # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "falsification.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Session Management
+session:
+  auto_save: true
+  save_interval: 300          # Seconds
+  preserve_artifacts: true
+  artifact_dir: ".falsification_artifacts"
