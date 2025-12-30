@@ -598,17 +598,14 @@ def get_recent_changes() -> list:
 
 def get_existing_worktrees() -> int:
     """Count existing worktrees for this repo."""
-    result = subprocess.run(
-        ["git", "worktree", "list"],
-        capture_output=True,
-        text=True
-    )
+    # Use shared infrastructure
+    sys.path.insert(0, str(Path(__file__).parent))
+    from shared.git_utils import count_worktrees
 
-    if result.returncode != 0:
+    try:
+        return count_worktrees(Path.cwd())
+    except Exception:
         return 0
-
-    # Count lines (each worktree is one line)
-    return len(result.stdout.strip().split('\n'))
 
 
 def check_branch_conflicts(branches: list) -> dict:

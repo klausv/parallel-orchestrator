@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
 Configuration management for falsification debugger
+
+DEPRECATED: This module is deprecated in favor of unified_config.py
+New code should use UnifiedConfig instead of FalsificationConfig.
+
+For migration:
+    from scripts.parallel_test.unified_config import UnifiedConfig
+
+    # Old way (deprecated)
+    config = FalsificationConfig.from_yaml("config.yaml")
+
+    # New way (recommended)
+    config = UnifiedConfig.from_yaml("config.yaml")
+    old_config = config.to_falsification_config()  # If needed for compatibility
 """
 
 from dataclasses import dataclass, field, asdict
@@ -9,6 +22,7 @@ from typing import Dict, List, Optional
 from enum import Enum
 import yaml
 import json
+import warnings
 
 
 class HypothesisStatus(Enum):
@@ -124,7 +138,12 @@ class FalsificationReport:
 
 @dataclass
 class FalsificationConfig:
-    """Configuration for falsification debugging"""
+    """
+    Configuration for falsification debugging
+
+    DEPRECATED: Use UnifiedConfig from unified_config.py instead.
+    This class is maintained for backward compatibility only.
+    """
 
     # Hypothesis Management
     max_hypotheses: int = 5
@@ -162,9 +181,29 @@ class FalsificationConfig:
     use_memory_mcp: bool = True
     session_prefix: str = "falsification"
 
+    def __post_init__(self):
+        """Show deprecation warning"""
+        warnings.warn(
+            "FalsificationConfig is deprecated. Use UnifiedConfig from unified_config.py instead. "
+            "See scripts/parallel_test/unified_config.py for migration guide.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
     @classmethod
     def from_yaml(cls, config_path: str) -> "FalsificationConfig":
-        """Load configuration from YAML file"""
+        """
+        Load configuration from YAML file
+
+        DEPRECATED: Use UnifiedConfig.from_yaml() instead
+        """
+        warnings.warn(
+            "FalsificationConfig.from_yaml() is deprecated. "
+            "Use UnifiedConfig.from_yaml() instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f) or {}
 
@@ -173,9 +212,10 @@ class FalsificationConfig:
 
         # Hypothesis management
         if "hypothesis_management" in config_dict:
+            hm = config_dict["hypothesis_management"]
             flat_config.update({
-                "max_hypotheses": config_dict["hypothesis_management"].get("max_concurrent", 5),
-                "require_falsifiability": config_dict["hypothesis_management"].get("validation_rules", {}).get("require_test_strategy", True)
+                "max_hypotheses": hm.get("max_concurrent", 5),
+                "require_falsifiability": hm.get("validation_rules", {}).get("require_test_strategy", True)
             })
 
         # Test execution
@@ -192,8 +232,8 @@ class FalsificationConfig:
                 })
 
         # Agent integration
-        if "integration" in config_dict:
-            integration = config_dict["integration"]
+        if "agent_integration" in config_dict:
+            integration = config_dict["agent_integration"]
             flat_config.update({
                 "use_root_cause_analyst": integration.get("root_cause_analyst", {}).get("enabled", True),
                 "use_sequential_thinking": integration.get("sequential_thinking_mcp", {}).get("enabled", True),
@@ -211,6 +251,68 @@ class FalsificationConfig:
         filtered_config = {k: v for k, v in config_dict.items() if k in known_fields}
         return cls(**filtered_config)
 
+    @classmethod
+    def from_unified(cls, unified_config) -> "FalsificationConfig":
+        """
+        Create FalsificationConfig from UnifiedConfig
+
+        Args:
+            unified_config: UnifiedConfig instance
+
+        Returns:
+            FalsificationConfig instance (for backward compatibility)
+        """
+        return unified_config.to_falsification_config()
+
     def to_dict(self) -> Dict:
         """Convert to dictionary"""
         return asdict(self)
+
+    def to_unified(self):
+        """
+        Convert to UnifiedConfig
+
+        Returns:
+            UnifiedConfig instance
+        """
+        from .unified_config import UnifiedConfig
+        return UnifiedConfig.from_falsification_config(self)
+
+
+# ============================================================================
+# MIGRATION HELPERS
+# ============================================================================
+
+def migrate_to_unified_config(old_config: FalsificationConfig):
+    """
+    Migrate old FalsificationConfig to new UnifiedConfig.
+
+    Args:
+        old_config: FalsificationConfig instance
+
+    Returns:
+        UnifiedConfig instance
+
+    Example:
+        old_config = FalsificationConfig.from_yaml("config.yaml")
+        new_config = migrate_to_unified_config(old_config)
+    """
+    from .unified_config import UnifiedConfig
+    return UnifiedConfig.from_falsification_config(old_config)
+
+
+def load_config_auto(config_path: Optional[str] = None):
+    """
+    Auto-load configuration using the new UnifiedConfig system.
+
+    This is a convenience function that automatically uses UnifiedConfig
+    instead of the deprecated FalsificationConfig.
+
+    Args:
+        config_path: Path to YAML config file (optional)
+
+    Returns:
+        UnifiedConfig instance
+    """
+    from .unified_config import load_config
+    return load_config(config_path)

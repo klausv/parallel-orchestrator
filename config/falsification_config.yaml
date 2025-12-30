@@ -1,9 +1,11 @@
 # Falsification Debugger Configuration
 # Reference: docs/falsification-debugger-architecture.md
+# Compatible with UnifiedConfig (scripts/parallel_test/unified_config.py)
 
 hypothesis_management:
   max_concurrent: 5           # Maximum hypotheses to test simultaneously
   min_hypotheses: 2           # Minimum hypotheses before starting tests
+  require_falsifiability: true
 
   ranking_weights:
     probability: 0.5          # Weight for likelihood score
@@ -20,18 +22,26 @@ worktree_orchestration:
   branch_prefix: "hyp"        # Branches: hyp-1, hyp-2, ...
   auto_cleanup: true          # Cleanup after testing
   preserve_on_error: false    # Keep worktrees if tests fail (for debugging)
+  use_pool: true              # Use worktree pool for efficiency
+  pool_size: 10               # Number of pre-created worktrees
 
 test_execution:
   default_timeout: 300        # Seconds (5 minutes)
   min_parallel_time: 60       # Only parallelize if test >= 60s
   max_concurrent_tests: 5     # Maximum tests running simultaneously
+  test_command: "pytest"      # Default test command
   capture_stdout: true
   capture_stderr: true
   collect_metrics: true
+  use_async: true             # Use async execution when possible
 
   overhead:
     worktree_creation: 8.0    # Seconds
+    session_startup: 5.0      # Seconds
+    context_building: 20.0    # Seconds - Claude understanding context
     environment_setup: 5.0    # Seconds
+    merge_per_branch: 10.0    # Seconds per branch merge
+    conflict_resolution: 60.0 # Seconds base time for conflict resolution
     cleanup: 3.0              # Seconds
 
 results_analysis:
@@ -51,6 +61,29 @@ results_analysis:
         - timeout
         - error
         - confidence < 0.7
+
+# Task Splitting and Parallelization Optimization
+task_splitting:
+  # Resource limits
+  max_concurrent_sessions: 8  # Maximum parallel Claude sessions
+  max_worktrees: 15           # Maximum git worktrees per repo
+  min_files_per_subtask: 2    # Minimum files to justify a subtask
+  min_task_complexity: 0.2    # Minimum complexity (0.0-1.0) to consider splitting
+
+  # Break-even thresholds (minutes)
+  # Tasks shorter than these should NOT be split
+  min_task_time_for_splits:
+    2: 5.0    # 2-way split requires >5 min task
+    3: 12.0   # 3-way split requires >12 min task
+    4: 20.0   # 4-way split requires >20 min task
+    5: 30.0   # 5+ way split requires >30 min task
+
+  # Complexity scoring weights
+  complexity_weights:
+    file_modify: 0.15         # Per file to modify
+    file_create: 0.10         # Per file to create
+    loc_estimate: 0.001       # Per estimated line of code
+    dependency: 0.05          # Per cross-file dependency
 
 agent_integration:
   # SuperClaude Agent Integration
@@ -112,4 +145,11 @@ session:
   auto_save: true
   save_interval: 300          # Seconds
   preserve_artifacts: true
+  artifact_dir: ".falsification_artifacts"
+
+# Paths (optional - defaults to current directory)
+paths:
+  project_root: "."
+  output_dir: "."
+  config_file: ""
   artifact_dir: ".falsification_artifacts"

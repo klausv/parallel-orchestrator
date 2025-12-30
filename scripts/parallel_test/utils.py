@@ -3,33 +3,26 @@
 Shared utilities for falsification debugger
 """
 
-import logging
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+# Use shared infrastructure for logging
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.logging_utils import setup_logging as _setup_logging
 
-def setup_logging(log_file: Optional[Path] = None, level: int = logging.INFO) -> None:
+# Re-export setup_logging with same signature for backwards compatibility
+def setup_logging(log_file: Optional[Path] = None, level: int = 20) -> None:
     """
-    Setup logging configuration
+    Setup logging configuration (delegates to shared infrastructure)
 
     Args:
         log_file: Optional file path for logging
-        level: Logging level (default: INFO)
+        level: Logging level (default: INFO/20)
     """
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    handlers = [logging.StreamHandler()]
-
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
-
-    logging.basicConfig(
-        level=level,
-        format=log_format,
-        handlers=handlers
-    )
+    _setup_logging(level=level, log_file=log_file)
 
 
 def load_json_file(file_path: Path) -> Dict[str, Any]:
