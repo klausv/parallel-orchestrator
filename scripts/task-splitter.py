@@ -22,6 +22,16 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass, asdict
 
+# Import logging module
+try:
+    from logs import (
+        OrchestratorLogger, TaskSplitDecision, AgentAllocation,
+        LogLevel, OperationType
+    )
+    HAS_LOGGING = True
+except ImportError:
+    HAS_LOGGING = False
+
 try:
     import anthropic
     HAS_ANTHROPIC = True
@@ -998,6 +1008,17 @@ def main():
         action="store_true",
         help="Show detailed overhead analysis"
     )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="Disable logging to files"
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Custom log directory (default: ./logs)"
+    )
 
     args = parser.parse_args()
     config = DEFAULT_CONFIG
@@ -1052,6 +1073,14 @@ def main():
         parser.print_help()
         return
 
+    # Initialize logger
+    logger = None
+    if HAS_LOGGING and not args.no_log:
+        log_path = Path(args.log_dir) if args.log_dir else Path.cwd()
+        logger = OrchestratorLogger(log_path)
+        logger.log(LogLevel.INFO, OperationType.SESSION,
+                   f"Starting task split: {args.task[:100]}...")
+
     print(f"\nAnalyzing task: {args.task}\n")
 
     # Gather data
@@ -1060,6 +1089,17 @@ def main():
 
     # Analyze complexity
     complexity = analyze_complexity(structure, recent, args.task, config)
+
+    # Log complexity analysis
+    if logger:
+        logger.log_complexity_analysis({
+            "total_score": complexity.total_score,
+            "file_count": complexity.file_count,
+            "module_count": complexity.module_count,
+            "max_parallel_by_structure": complexity.max_parallel_by_structure,
+            "hot_files": complexity.hot_files,
+            "task": args.task
+        })
 
     # Estimate task time
     estimated_time = estimate_task_time(complexity, args.task_scope)
@@ -1089,6 +1129,39 @@ def main():
     result = split_task_with_claude(
         args.task, structure, recent, complexity, overhead_analysis, config
     )
+
+    # Log the task split decision
+    if logger and "error" not in result:
+        subtasks = result.get("subtasks", [])
+        logger.log_task_split(TaskSplitDecision(
+            task_description=args.task,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            recommended_splits=overhead_analysis.recommended_splits,
+            actual_splits=len(subtasks),
+            complexity_score=complexity.total_score,
+            estimated_sequential_minutes=overhead_analysis.estimated_sequential_minutes,
+            estimated_parallel_minutes=overhead_analysis.estimated_parallel_minutes,
+            efficiency_gain_percent=overhead_analysis.efficiency_gain_percent,
+            is_worth_parallelizing=overhead_analysis.is_worth_parallelizing,
+            reasoning=overhead_analysis.reasoning,
+            subtasks=subtasks,
+            file_ownership=result.get("file_ownership", {}),
+            conflict_risk=result.get("conflict_risk", "UNKNOWN"),
+            validation_passed=result.get("validation", {}).get("valid", True)
+        ))
+
+        # Log each agent allocation
+        for subtask in subtasks:
+            logger.log_agent_allocation(AgentAllocation(
+                subtask_name=subtask.get("name", "unknown"),
+                agent_type=subtask.get("recommended_agent", "general-purpose"),
+                skill_command=subtask.get("recommended_skill", "/sc:implement"),
+                confidence=subtask.get("agent_confidence", 0.0),
+                rationale=subtask.get("agent_rationale", ""),
+                files_assigned=subtask.get("files_to_modify", []) + subtask.get("files_to_create", []),
+                estimated_complexity=subtask.get("estimated_complexity", "MEDIUM"),
+                estimated_minutes=subtask.get("estimated_minutes", 0.0)
+            ))
 
     if args.output == "json":
         print(json.dumps(result, indent=2))
@@ -1214,6 +1287,13 @@ def main():
                     if num_specialized > 0:
                         specialization_bonus = num_specialized * 5  # ~5% per specialized agent
                         print(f"#   + Specialization bonus: ~{specialization_bonus}% (est.)")
+
+    # Save reports at end of session
+    if logger:
+        json_path, md_path = logger.save_reports()
+        print(f"\n📊 Session logged: {logger.session_id}")
+        print(f"   JSON: {json_path}")
+        print(f"   Markdown: {md_path}")
 
 
 if __name__ == "__main__":

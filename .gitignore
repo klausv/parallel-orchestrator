@@ -38,3 +38,10 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# Logs directory - exclude data but keep structure
+logs/sessions/*.jsonl
+logs/reports/*.json
+logs/reports/*.md
+logs/shell/*.log
+!logs/**/.gitkeep
