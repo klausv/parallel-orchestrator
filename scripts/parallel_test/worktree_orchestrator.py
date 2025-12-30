@@ -7,6 +7,7 @@ Manages git worktree lifecycle for parallel hypothesis testing
 
 import subprocess
 import logging
+import shlex
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -25,7 +26,15 @@ class WorktreeConfig:
 
 
 class WorktreeOrchestrator:
-    """Manages git worktrees for parallel testing"""
+    """
+    Manages git worktrees for parallel testing.
+
+    Supports context manager protocol for guaranteed cleanup:
+        with WorktreeOrchestrator(config) as orchestrator:
+            worktrees = orchestrator.create_worktrees(hypotheses)
+            # ... run tests ...
+        # Cleanup happens automatically
+    """
 
     def __init__(self, config: WorktreeConfig, fals_config: Optional[FalsificationConfig] = None):
         """
@@ -38,6 +47,18 @@ class WorktreeOrchestrator:
         self.config = config
         self.fals_config = fals_config or FalsificationConfig()
         self.active_worktrees: Dict[str, Path] = {}
+        self._entered = False
+
+    def __enter__(self):
+        """Context manager entry - returns self for worktree operations"""
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - guarantees worktree cleanup"""
+        self.cleanup_all()
+        self._entered = False
+        return False  # Don't suppress exceptions
 
     def create_worktrees(self, hypotheses: List[Hypothesis]) -> Dict[str, Path]:
         """
@@ -122,25 +143,34 @@ class WorktreeOrchestrator:
             test_dir = worktree_path / ".falsification"
             test_dir.mkdir(exist_ok=True)
 
-            # Write hypothesis test script
+            # Write hypothesis test script with proper shell escaping
             test_script = test_dir / f"test_{hypothesis.id}.sh"
+
+            # Escape all user-provided strings for shell safety
+            safe_id = shlex.quote(hypothesis.id)
+            safe_description = shlex.quote(hypothesis.description)
+            safe_strategy = shlex.quote(hypothesis.test_strategy)
+            safe_expected = shlex.quote(hypothesis.expected_behavior)
+            safe_worktree = shlex.quote(str(worktree_path))
+
             test_script_content = f"""#!/bin/bash
-# Falsification test for hypothesis: {hypothesis.id}
-# Description: {hypothesis.description}
-# Test Strategy: {hypothesis.test_strategy}
+# Falsification test for hypothesis: {safe_id}
+# Description: {safe_description}
+# Test Strategy: {safe_strategy}
 
 set -e
 
-echo "Testing hypothesis: {hypothesis.id}"
-echo "Description: {hypothesis.description}"
-echo "Test Strategy: {hypothesis.test_strategy}"
+echo "Testing hypothesis:" {safe_id}
+echo "Description:" {safe_description}
+echo "Test Strategy:" {safe_strategy}
 echo ""
-echo "Expected Behavior: {hypothesis.expected_behavior}"
+echo "Expected Behavior:" {safe_expected}
 echo ""
 
 # Run the test command
-cd {worktree_path}
-{hypothesis.test_strategy}
+cd {safe_worktree}
+# NOTE: test_strategy is executed as a command - ensure it's trusted input
+eval {safe_strategy}
 
 # Exit code indicates test result
 exit $?
@@ -228,11 +258,18 @@ exit $?
         self.cleanup_worktrees(hyp_ids)
 
     def __del__(self):
-        """Cleanup on deletion"""
-        try:
-            self.cleanup_all()
-        except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+        """
+        Fallback cleanup on deletion.
+
+        WARNING: __del__ is unreliable - prefer using context manager (with statement).
+        This is only a safety net for cases where context manager wasn't used.
+        """
+        if self.active_worktrees and not self._entered:
+            logger.warning("WorktreeOrchestrator not used as context manager - cleanup may be incomplete")
+            try:
+                self.cleanup_all()
+            except Exception as e:
+                logger.warning(f"Error during fallback cleanup: {e}")
 
     def __repr__(self) -> str:
         """String representation"""

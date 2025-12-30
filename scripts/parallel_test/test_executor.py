@@ -6,10 +6,11 @@ Executes tests in parallel worktrees with timeout enforcement
 """
 
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from .config import Hypothesis, TestResult, TestExecutionResult, HypothesisStatus, FalsificationConfig
 
 logger = logging.getLogger(__name__)
@@ -53,12 +54,13 @@ class TestExecutor:
                 for hyp in hypotheses
             }
 
-            for future in futures:
+            # Use as_completed() to process results as they finish (prevents race condition)
+            for future in as_completed(futures, timeout=self.timeout_seconds * len(hypotheses)):
+                hyp = futures[future]
                 try:
                     result = future.result(timeout=self.timeout_seconds)
                     results.append(result)
                 except FutureTimeoutError:
-                    hyp = futures[future]
                     logger.warning(f"Execution timed out: {hyp.id}")
                     results.append(TestExecutionResult(
                         hypothesis_id=hyp.id,
@@ -68,7 +70,6 @@ class TestExecutor:
                         exit_code=124
                     ))
                 except Exception as e:
-                    hyp = futures[future]
                     logger.error(f"Test execution error for {hyp.id}: {e}")
                     results.append(TestExecutionResult(
                         hypothesis_id=hyp.id,
@@ -113,8 +114,6 @@ class TestExecutor:
             )
 
         try:
-            import subprocess
-
             # Run test script with timeout via shell
             result = subprocess.run(
                 [str(test_script)],
@@ -171,10 +170,12 @@ class TestExecutor:
         """
         Determine if parallelization is worth overhead (FR3.3)
 
-        Rules:
-            - At least one hypothesis has test_time >= min_parallel_time
-            - Multiple hypotheses to test
-            - Sufficient system resources
+        Uses break-even analysis:
+            sequential_time = sum(all test times)
+            parallel_time = max(test time) + overhead
+            overhead = 7s base + 16s per worktree (creation + setup + cleanup)
+
+        Only parallelize if: sequential_time > parallel_time
 
         Args:
             hypotheses: List of hypotheses to evaluate
@@ -186,13 +187,24 @@ class TestExecutor:
             logger.info("Not parallelizing: only 1 hypothesis")
             return False
 
-        # Check if any test is long enough
-        max_test_time = max((h.estimated_test_time for h in hypotheses), default=0)
-        if max_test_time < self.min_parallel_time:
-            logger.info(f"Not parallelizing: max test time ({max_test_time}s) < threshold ({self.min_parallel_time}s)")
+        # Calculate sequential time (sum of all test times)
+        test_times = [h.estimated_test_time for h in hypotheses]
+        sequential_time = sum(test_times)
+
+        # Calculate parallel time (max test time + overhead)
+        # Overhead: 7s base + 16s per worktree (8s create + 5s setup + 3s cleanup)
+        n = len(hypotheses)
+        overhead = 7 + (16 * n)
+        parallel_time = max(test_times) + overhead
+
+        # Break-even analysis
+        time_saved = sequential_time - parallel_time
+
+        if time_saved <= 0:
+            logger.info(f"Not parallelizing: no time savings (sequential={sequential_time}s, parallel={parallel_time}s, overhead={overhead}s)")
             return False
 
-        logger.info(f"Parallelizing: {len(hypotheses)} tests with max time {max_test_time}s")
+        logger.info(f"Parallelizing: saves {time_saved:.0f}s (sequential={sequential_time}s → parallel={parallel_time}s)")
         return True
 
     def _classify_test_result(self, exit_code: int) -> TestResult:

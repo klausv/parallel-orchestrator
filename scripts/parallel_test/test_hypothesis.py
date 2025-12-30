@@ -109,15 +109,14 @@ class FalsificationDebugger:
             logger.info("✓ Analysis complete. Use without --analyze-only to run tests.")
             return
 
-        # Phase 3: Create worktrees
+        # Phase 3: Create worktrees (using context manager for guaranteed cleanup)
         logger.info("[Phase 3] Creating git worktrees...")
         worktree_config = WorktreeConfig(
             base_repo=Path.cwd(),
             worktree_dir=Path.cwd().parent / "worktrees"
         )
-        orchestrator = WorktreeOrchestrator(worktree_config, self.config)
 
-        try:
+        with WorktreeOrchestrator(worktree_config, self.config) as orchestrator:
             worktrees = orchestrator.create_worktrees(top_k)
             logger.info(f"✓ Created {len(worktrees)} worktrees")
 
@@ -173,12 +172,10 @@ class FalsificationDebugger:
             logger.info("")
             logger.info(report.recommended_action)
 
-        finally:
-            # Cleanup
-            logger.info("")
-            logger.info("[Cleanup] Removing worktrees...")
-            orchestrator.cleanup_all()
-            logger.info("✓ Cleanup complete")
+        # Cleanup happens automatically via context manager
+        logger.info("")
+        logger.info("[Cleanup] Worktrees removed automatically")
+        logger.info("✓ Cleanup complete")
 
     def _generate_hypotheses_with_rca(self, bug_description: str) -> List:
         """
